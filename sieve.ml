@@ -6,7 +6,11 @@
    many yield handlers installed by the nested calls to filter_gen.
 
    All handlers use Effect.Shallow, matching the Racket version's
-   explicit recursive re-installation of handlers. *)
+   explicit recursive re-installation of handlers.
+
+   A generator is represented as a (unit, unit) Effect.Shallow.continuation
+   rather than a thunk, since handler continuations k are already
+   continuations — this avoids reify/fiber roundtrips. *)
 
 (* Effects *)
 type _ Effect.t +=
@@ -16,20 +20,7 @@ type _ Effect.t +=
 let yield v = Effect.perform (Yield v)
 let ctr_inc () = Effect.perform Ctr_inc
 
-(* Convert a shallow continuation back into a generator thunk
-   by re-performing all effects it produces. *)
-let reify (k : (unit, unit) Effect.Shallow.continuation) : unit -> unit =
-  fun () ->
-    let rec fwd : (unit, unit) Effect.Shallow.handler =
-      { Effect.Shallow.retc = Fun.id
-      ; exnc = raise
-      ; effc = fun (type a) (eff : a Effect.t) ->
-          Some (fun (k : (a, _) Effect.Shallow.continuation) ->
-            let v = Effect.perform eff in
-            Effect.Shallow.continue_with k v fwd)
-      }
-    in
-    Effect.Shallow.continue_with k () fwd
+type gen = (unit, unit) Effect.Shallow.continuation
 
 (* Counter effect handler — state threaded through recursive re-installation,
    matching the Racket: (with-counter (+ n 1) (lambda () (k n))) *)
@@ -47,10 +38,8 @@ let with_counter init thunk =
   in
   Effect.Shallow.continue_with (Effect.Shallow.fiber thunk) () (handler init)
 
-(* A generator is a (unit -> unit) that may yield values when called. *)
-
-(* collect : generator -> int list *)
-let collect gen =
+(* collect : gen -> int list *)
+let collect (g : gen) =
   let rec handler : (unit, int list) Effect.Shallow.handler =
     { Effect.Shallow.retc = (fun () -> [])
     ; exnc = raise
@@ -62,11 +51,11 @@ let collect gen =
         | _ -> None
     }
   in
-  Effect.Shallow.continue_with (Effect.Shallow.fiber gen) () handler
+  Effect.Shallow.continue_with g () handler
 
-(* filter_gen : generator -> (int -> bool) -> generator *)
-let filter_gen gen pred =
-  fun () ->
+(* filter_gen : gen -> (int -> bool) -> gen *)
+let filter_gen (g : gen) pred : gen =
+  Effect.Shallow.fiber (fun () ->
     let rec handler : (unit, unit) Effect.Shallow.handler =
       { Effect.Shallow.retc = Fun.id
       ; exnc = raise
@@ -79,34 +68,40 @@ let filter_gen gen pred =
           | _ -> None
       }
     in
-    Effect.Shallow.continue_with (Effect.Shallow.fiber gen) () handler
+    Effect.Shallow.continue_with g () handler)
 
-(* naturals : int -> int -> generator *)
-let rec naturals min max =
-  fun () ->
-    if min < max then begin
-      yield min;
-      (naturals (min + 1) max) ()
-    end
+(* naturals : int -> int -> gen *)
+let naturals min max : gen =
+  Effect.Shallow.fiber (fun () ->
+    let rec loop i =
+      if i < max then begin
+        yield i;
+        loop (i + 1)
+      end
+    in
+    loop min)
 
-(* sieve : generator -> generator *)
-let rec sieve gen =
-  fun () ->
-    Effect.Shallow.continue_with (Effect.Shallow.fiber gen) ()
-      { Effect.Shallow.retc = Fun.id
-      ; exnc = raise
-      ; effc = fun (type a) (eff : a Effect.t) ->
-          match eff with
-          | Yield p ->
-            Some (fun (k : (a, _) Effect.Shallow.continuation) ->
-              yield p;
-              (sieve (filter_gen (reify k)
-                        (fun x -> ignore (ctr_inc ()); x mod p <> 0))) ())
-          | _ -> None
-      }
+(* run_sieve : gen -> unit  —  directly performs yields, no wrapping *)
+let rec run_sieve (g : gen) =
+  Effect.Shallow.continue_with g ()
+    { Effect.Shallow.retc = Fun.id
+    ; exnc = raise
+    ; effc = fun (type a) (eff : a Effect.t) ->
+        match eff with
+        | Yield p ->
+          Some (fun (k : (a, _) Effect.Shallow.continuation) ->
+            yield p;
+            run_sieve (filter_gen k
+                        (fun x -> ignore (ctr_inc ()); x mod p <> 0)))
+        | _ -> None
+    }
+
+(* sieve : gen -> gen *)
+let sieve (g : gen) : gen =
+  Effect.Shallow.fiber (fun () -> run_sieve g)
 
 let () =
-  let n = 4000 in
+  let n = 6000 in
   with_counter 0 (fun () ->
     let t0 = Sys.time () in
     let primes = collect (sieve (naturals 2 n)) in
