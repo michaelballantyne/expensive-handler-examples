@@ -12,7 +12,7 @@
       (set! ctr (+ 1 ctr))
       (var ctr)))
   (define (with-fresh-var n thunk)
-    (set! ctr n)
+    (set! ctr (- n 1))
     (thunk)))
 
 ;; Implementing counter effect by an outer handler
@@ -132,7 +132,7 @@
     (g1 st)
     (g2 st)))
 
-    (define empty-s (hash))
+(define empty-s (hash))
 
 
 ;;
