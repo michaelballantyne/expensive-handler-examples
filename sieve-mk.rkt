@@ -1,25 +1,6 @@
 #lang racket
 
-
-(define prompt-mark-key (make-continuation-mark-key 'prompt-depth))
-
-(define (call-with-marked-prompt thunk tag handler)
-  (call-with-continuation-prompt
-   (lambda ()
-     (with-continuation-mark prompt-mark-key tag
-       (thunk)))
-   tag
-   handler))
-
-;; To count prompts for a specific tag:
-(define (prompt-count-for tag)
-  (length (filter (lambda (v) (eq? v tag))
-                  (continuation-mark-set->list
-                   (current-continuation-marks)
-                   prompt-mark-key))))
-
-
-;; An even tinier microbenchmark that exhibits the same control flow as
+;; An even tinier microbenchmark that exhibits similar control flow as
 ;; the mk example but without needing the mechanics of fresh, unify, etc.
 
 ;; Implementing counter effect via set!
@@ -30,7 +11,7 @@
       (set! ctr (+ 1 ctr))
       ctr))
   (define (with-ctr-inc n thunk)
-    (set! ctr n)
+    (set! ctr (- n 1))
     (thunk)))
 
 ;; Implementing counter effect by an outer handler
@@ -39,54 +20,59 @@
   
   (define (ctr-inc)
     (call-with-composable-continuation
-      (lambda (k)
-        (abort-current-continuation ctr-inc-tag k))
-      ctr-inc-tag))
+     (lambda (k)
+       (abort-current-continuation ctr-inc-tag k))
+     ctr-inc-tag))
   
   (define (handle-ctr-inc handler body)
-    (call-with-marked-prompt
+    (call-with-continuation-prompt
      body
      ctr-inc-tag
      handler))
   
   (define (with-ctr-inc n thunk)
     (handle-ctr-inc
-      (lambda (k)
-        (with-ctr-inc (+ n 1) (lambda () (k n))))
-      thunk)))
+     (lambda (k)
+       (with-ctr-inc (+ n 1) (lambda () (k n))))
+     thunk)))
 
 (module+ test
   (require rackunit)
   (check-equal?
-    (with-ctr-inc 0
+   (with-ctr-inc 0
      (lambda ()
        (define v1 (ctr-inc))
        (define v2 (ctr-inc))
        (list v1 v2)))
-    (list 0 1)))
+   (list 0 1)))
 
 
 (define succeed-tag (make-continuation-prompt-tag))
 
 (define (succeed v)
   (call-with-composable-continuation
-    (lambda (k)
-      (abort-current-continuation succeed-tag v k))
-    succeed-tag))
+   (lambda (k)
+     (abort-current-continuation succeed-tag v k))
+   succeed-tag))
 
 (define (fail) (void))
 
 (define (assign key val)
   (lambda (st)
     (ctr-inc)
-    (printf "assign ~a to ~a\n" key val)
-    (printf "succeed prompts: ~a\n" (prompt-count-for succeed-tag))
-    (printf "ctr prompts: ~a\n" (prompt-count-for ctr-inc-tag))
+    ;;(printf "assign ~a to ~a\n" key val)
+    ;;(printf "succeed prompts: ~a\n" (prompt-count-for succeed-tag))
+    ;;(printf "ctr prompts: ~a\n" (prompt-count-for ctr-inc-tag))
     (if (hash-has-key? st key)
         (if (equal? val (hash-ref st key))
             (succeed st)
             (fail))
         (succeed (hash-set st key val)))))
+
+(define (disj g1 g2)
+  (lambda (st)
+    (g1 st)
+    (g2 st)))
 
 (define (conj g1 g2)
   (lambda (st)
@@ -94,24 +80,24 @@
 
 (define (append-map thunk g2)
   (handle-succeed
-    (lambda (v k)
-      (g2 v)
-      (append-map k g2))
-    thunk))
+   (lambda (v k)
+     (g2 v)
+     (append-map k g2))
+   thunk))
 
 (define (handle-succeed handler body)
-  (call-with-marked-prompt
+  (call-with-continuation-prompt
    body
    succeed-tag
    handler))
 
 (define (take-all thunk)
   (handle-succeed
-    (lambda (v k)
-      (cons v (take-all k)))
-    (lambda ()
-      (thunk)
-      '())))
+   (lambda (v k)
+     (cons v (take-all k)))
+   (lambda ()
+     (thunk)
+     '())))
 
 (define empty-s (hash))
 
@@ -122,16 +108,25 @@
       (printf "explored ~a assignments to find ~a solutions\n" (ctr-inc) (length res))
       res)))
 
-
-(define (range var min max)
+(define (check key pred)
   (lambda (st)
-    (let loop ([val min])
-      (cond 
-        [(< val max)
-         ((assign var val) st)
-         (loop (+ 1 val))]
-        [else (fail)]))))
+    (ctr-inc)
+    (if (and (hash-has-key? st key)
+             (pred (hash-ref st key)))
+        (succeed st)
+        (fail))))
+
+(define (sieve var min max)
+  (lambda (st)
+    (if (>= min max)
+        (fail)
+        ((disj
+           (assign var min)
+           (conj (sieve var (+ min 1) max)
+                 (check var (lambda (v) (not (zero? (remainder v min)))))))
+         st))))
 
 (module+ main
-  (define n 5)
-  (time (length (run (conj (range 'x 0 (* n 5)) (range 'x (* n 4) (* n 8)))))))
+  (define n 300)
+  #;(run (sieve 'x 2 n))
+  (time (length (run (sieve 'x 2 n)))))
