@@ -1,43 +1,41 @@
 #lang racket
 
 ;;
-;; Terms and unification
-;;
-
-(struct var [id] #:transparent)
+;; Global counter effect, used for allocating fresh variables
+;; 
 
 ;; Implementing counter effect via set!
 #;(begin
-(define ctr 0)
-(define fresh-var
-  (lambda ()
-    (set! ctr (+ 1 ctr))
-    (var ctr)))
-(define (with-fresh-var n thunk)
-  (set! ctr n)
-  (thunk)))
+  (define ctr 0)
+  (define fresh-var
+    (lambda ()
+      (set! ctr (+ 1 ctr))
+      (var ctr)))
+  (define (with-fresh-var n thunk)
+    (set! ctr n)
+    (thunk)))
 
 ;; Implementing counter effect by an outer handler
 (begin
-(define fresh-var-tag (make-continuation-prompt-tag))
-
-(define (fresh-var)
-  (call-with-composable-continuation
-    (lambda (k)
-      (abort-current-continuation fresh-var-tag k))
-    fresh-var-tag))
-
-(define (handle-fresh-var handler body)
-  (call-with-continuation-prompt
-   body
-   fresh-var-tag
-   handler))
-
-(define (with-fresh-var n thunk)
-  (handle-fresh-var
-    (lambda (k)
-      (with-fresh-var (+ n 1) (lambda () (k (var n)))))
-    thunk)))
+  (define fresh-var-tag (make-continuation-prompt-tag))
+  
+  (define (fresh-var)
+    (call-with-composable-continuation
+      (lambda (k)
+        (abort-current-continuation fresh-var-tag k))
+      fresh-var-tag))
+  
+  (define (handle-fresh-var handler body)
+    (call-with-continuation-prompt
+     body
+     fresh-var-tag
+     handler))
+  
+  (define (with-fresh-var n thunk)
+    (handle-fresh-var
+      (lambda (k)
+        (with-fresh-var (+ n 1) (lambda () (k (var n)))))
+      thunk)))
 
 (module+ test
   (require rackunit)
@@ -49,6 +47,11 @@
        (list v1 v2)))
     (list (var 0) (var 1))))
 
+;;
+;; Terms and unification
+;;
+
+(struct var [id] #:transparent)
 
 (define (unify u v s)
   (let ((u (walk u s)) (v (walk v s)))
@@ -129,20 +132,12 @@
     (g1 st)
     (g2 st)))
 
-(define (take n-or-f thunk)
-  (reverse (take-acc n-or-f thunk '())))
+    (define empty-s (hash))
 
-(define (take-acc n-or-f thunk acc)
-  (if (eqv? n-or-f 0)
-      acc
-      (handle-succeed
-        (lambda (v k)
-          (take-acc (and n-or-f (- n-or-f 1)) k (cons v acc)))
-        (lambda ()
-          (thunk)
-          acc))))
 
-(define empty-s (hash))
+;;
+;; `run` interface
+;;
 
 (define (run n f)
   (with-fresh-var 0
@@ -160,6 +155,20 @@
              (walk* (cdr v) s)))
       (else v))))
 
+(define (take n-or-f thunk)
+  (reverse (take-acc n-or-f thunk '())))
+
+(define (take-acc n-or-f thunk acc)
+  (if (eqv? n-or-f 0)
+      acc
+      (handle-succeed
+        (lambda (v k)
+          (take-acc (and n-or-f (- n-or-f 1)) k (cons v acc)))
+        (lambda ()
+          (thunk)
+          acc))))
+
+
 ;;
 ;; Relations
 ;;
@@ -172,13 +181,37 @@
          (call/fresh (lambda (d)
            (call/fresh (lambda (res)
              (conj (== l1 (cons a d))
-                   (conj (appendo d l2 res)
-                         (== out (cons a res)))))))))))
+                   (conj 
+                      (appendo d l2 res)
+                      (== out (cons a res)))))))))))
        st)))
 
 
-(module+ test
+;;
+;; Benchmark
+;;
 
+;; A benchmark query where almost all the cost is due to calling the `fresh-var`
+;; handler. Key characteristics:
+;;  - The appendo recursion sets up a conjunction with the recursion as g1, so we
+;;    build up a stack of `succeed-tag` prompts.
+;;      (If you swap the order of the recursive call and unification with out in
+;;       appendo, you can see what happens without the deep stack of prompts.)
+;;  - The query only has one solution, so succeed effects only bubble locally and
+;;    don't dominate the cost.
+;;  - I commented out the occurs check so that it doesn't dominate the cost.
+(module+ main
+  (define n 5000)
+  (time
+    (length
+      (run (+ n 1) (lambda (r) (appendo (range n) r (range n)))))))
+
+
+;;
+;; Tests
+;;
+
+(module+ test
   ;; Basic unification
   (check-equal?
    (run 2 (lambda (v) (== v 1)))
@@ -268,13 +301,3 @@
                        (== q (list l r)))))))))
    '((() (1 2 3)) ((1) (2 3)) ((1 2) (3)) ((1 2 3) ())))
 )
-
-(module+ main
-  (define n 2000)
-  (time
-    (length
-      (run (+ n 1) (lambda (q)
-                 (call/fresh (lambda (l)
-                   (call/fresh (lambda (r)
-                     (conj (appendo l r (range n))
-                           (== q (list l r))))))))))))
