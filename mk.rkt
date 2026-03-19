@@ -6,11 +6,49 @@
 
 (struct var [id] #:transparent)
 
+;; Implementing counter effect via set!
+#;(begin
+(define ctr 0)
 (define fresh-var
-  (let ([id 0])
-    (lambda ()
-      (set! id (+ 1 id))
-      (var id))))
+  (lambda ()
+    (set! ctr (+ 1 ctr))
+    (var ctr)))
+(define (with-fresh-var n thunk)
+  (set! ctr n)
+  (thunk)))
+
+;; Implementing counter effect by an outer handler
+(begin
+(define fresh-var-tag (make-continuation-prompt-tag))
+
+(define (fresh-var)
+  (call-with-composable-continuation
+    (lambda (k)
+      (abort-current-continuation fresh-var-tag k))
+    fresh-var-tag))
+
+(define (handle-fresh-var handler body)
+  (call-with-continuation-prompt
+   body
+   fresh-var-tag
+   handler))
+
+(define (with-fresh-var n thunk)
+  (handle-fresh-var
+    (lambda (k)
+      (with-fresh-var (+ n 1) (lambda () (k (var n)))))
+    thunk)))
+
+(module+ test
+  (require rackunit)
+  (check-equal?
+    (with-fresh-var 0
+     (lambda ()
+       (define v1 (fresh-var))
+       (define v2 (fresh-var))
+       (list v1 v2)))
+    (list (var 0) (var 1))))
+
 
 (define (unify u v s)
   (let ((u (walk u s)) (v (walk v s)))
@@ -34,7 +72,8 @@
     (hash-set s x v)))
 
 (define (occurs-check x v s)
-  (let ((v (walk v s)))
+  #f
+  #;(let ((v (walk v s)))
     (cond
       ((var? v) (equal? v x))
       ((pair? v)
@@ -106,9 +145,11 @@
 (define empty-s (hash))
 
 (define (run n f)
-  (let ([v (fresh-var)])
-    (map (lambda (s) (walk* v s))
-         (take n (lambda () ((f v) empty-s))))))
+  (with-fresh-var 0
+    (lambda ()
+      (let ([v (fresh-var)])
+        (map (lambda (s) (walk* v s))
+             (take n (lambda () ((f v) empty-s))))))))
 
 (define (walk* v s)
   (let ((v (walk v s)))
@@ -119,8 +160,24 @@
              (walk* (cdr v) s)))
       (else v))))
 
+;;
+;; Relations
+;;
+
+(define (appendo l1 l2 out)
+  (lambda (st)
+    ((disj
+       (conj (== l1 '()) (== l2 out))
+       (call/fresh (lambda (a)
+         (call/fresh (lambda (d)
+           (call/fresh (lambda (res)
+             (conj (== l1 (cons a d))
+                   (conj (appendo d l2 res)
+                         (== out (cons a res)))))))))))
+       st)))
+
+
 (module+ test
-  (require rackunit)
 
   ;; Basic unification
   (check-equal?
@@ -172,5 +229,52 @@
                        (conj (disj (== x 1) (== x 2))
                              (disj (== y 'a) (== y 'b))))))))))
    '((1 a) (1 b) (2 a) (2 b)))
+
+  ;; appendo: forward mode
+  (check-equal?
+   (run #f (lambda (q) (appendo '(1 2) '(3 4) q)))
+   '((1 2 3 4)))
+  ;; appendo: empty first list
+  (check-equal?
+   (run #f (lambda (q) (appendo '() '(a b) q)))
+   '((a b)))
+
+  ;; appendo: empty second list
+  (check-equal?
+   (run #f (lambda (q) (appendo '(a b) '() q)))
+   '((a b)))
+
+  ;; appendo: both empty
+  (check-equal?
+   (run #f (lambda (q) (appendo '() '() q)))
+   '(()))
+
+  ;; appendo: decompose first list
+  (check-equal?
+   (run 1 (lambda (q) (appendo q '(3 4) '(1 2 3 4))))
+   '((1 2)))
+
+  ;; appendo: decompose second list
+  (check-equal?
+   (run #f (lambda (q) (appendo '(1 2) q '(1 2 3 4))))
+   '((3 4)))
+
+  ;; appendo: enumerate all splits
+  (check-equal?
+   (run 4 (lambda (q)
+             (call/fresh (lambda (l)
+               (call/fresh (lambda (r)
+                 (conj (appendo l r '(1 2 3))
+                       (== q (list l r)))))))))
+   '((() (1 2 3)) ((1) (2 3)) ((1 2) (3)) ((1 2 3) ())))
 )
 
+(module+ main
+  (define n 2000)
+  (time
+    (length
+      (run (+ n 1) (lambda (q)
+                 (call/fresh (lambda (l)
+                   (call/fresh (lambda (r)
+                     (conj (appendo l r (range n))
+                           (== q (list l r))))))))))))
