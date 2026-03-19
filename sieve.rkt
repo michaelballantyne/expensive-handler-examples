@@ -102,7 +102,7 @@
    '(2 3 5 7 11 13 17 19)))
 
 (module+ main
-  (define n 1000)
+  (define n 6000)
   (with-counter 0
     (lambda ()
       (define primes (time (collect (sieve (naturals 2 n)))))
