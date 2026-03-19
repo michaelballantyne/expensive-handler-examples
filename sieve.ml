@@ -18,12 +18,18 @@ type _ Effect.t +=
   | Ctr_inc : int Effect.t
 
 let yield v = Effect.perform (Yield v)
-let ctr_inc () = Effect.perform Ctr_inc
 
 type gen = (unit, unit) Effect.Shallow.continuation
 
-(* Counter effect handler — state threaded through recursive re-installation,
-   matching the Racket: (with-counter (+ n 1) (lambda () (k n))) *)
+(* counter effect via ref cell *)
+(*
+let ctr = ref 0
+let ctr_inc () = ctr := !ctr + 1; !ctr
+let with_counter n thunk = ctr := n - 1; thunk ()
+*)
+
+(* counter effect via handler *)
+let ctr_inc () = Effect.perform Ctr_inc
 let with_counter init thunk =
   let rec handler : type b. int -> (b, b) Effect.Shallow.handler = fun n ->
     { Effect.Shallow.retc = Fun.id
